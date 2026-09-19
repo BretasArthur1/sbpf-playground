@@ -1,0 +1,246 @@
+WHITESPACE = _{ " " | "\t" | "\r" }
+COMMENT    = _{ (";" | "#" | "//") ~ (!NEWLINE ~ ANY)* }
+
+// Numbers (decimal and hex)
+hex_number     = @{ "-"? ~ "0x" ~ ASCII_HEX_DIGIT+ ~ ("_" ~ ASCII_HEX_DIGIT+)* }
+decimal_number = @{ "-"? ~ ASCII_DIGIT+ ~ ("_" ~ ASCII_DIGIT+)* }
+number         = @{ hex_number | decimal_number }
+
+// String literals.
+string_content = @{ (!"\"" ~ ANY)* }
+string_literal = ${ "\"" ~ string_content ~ "\"" }
+
+// Registers
+register      = @{ "r" ~ ("10" | ASCII_DIGIT) }
+register_32   = @{ "w" ~ ("10" | ASCII_DIGIT) }
+llvm_register = @{ register | register_32 }
+
+// identifier is used when defining a name
+identifier = @{
+    !register ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+// symbol is used when referencing a previously defined name
+symbol = @{ identifier }
+
+// Numeric labels ( can be referenced with f or b)
+numeric_label     = @{ ASCII_DIGIT+ }
+numeric_label_ref = @{ numeric_label ~ ("f" | "b") }
+
+// Expressions
+bin_op     = { "+" | "-" | "*" | "/" }
+term       = { "(" ~ expression ~ ")" | number | symbol }
+expression = { term ~ (bin_op ~ term)* }
+
+// Operand (full arithmetic expression support for label math, .equ constants, etc.)
+operand = { expression }
+
+// Memory offset.
+memory_op     = { "+" | "-" }
+memory_offset = { number | symbol }
+mem_size      = { "u64" | "u32" | "u16" | "u8" }
+memory_ref    = { "[" ~ register ~ (memory_op ~ memory_offset)+ ~ "]" }
+llvm_memory_ref  = { "(" ~ register ~ (memory_op ~ memory_offset)? ~ ")" }
+
+// Jump target
+signed_number = @{ ("+" | "-")? ~ (hex_number | decimal_number) }
+jump_target   =  { numeric_label_ref | signed_number | symbol }
+
+// ============
+// DIRECTIVES
+// ============
+
+// Global
+globl_symbol    = { identifier }
+directive_globl = { (".globl" | ".global") ~ globl_symbol }
+
+// External
+directive_extern = { ".extern" ~ symbol+ }
+
+// Constant
+directive_equ = { ".equ" ~ identifier ~ "," ~ expression }
+
+// Sections
+directive_section = {
+    ".text"
+  | ".data"
+  | ".rodata"
+}
+
+// Data directives
+directive_ascii = { ".ascii" ~ string_literal }
+directive_byte  = { ".byte" ~ number ~ ("," ~ number)* }
+directive_short = { (".short" | ".half") ~ number ~ ("," ~ number)* }
+directive_word  = { ".word" ~ number ~ ("," ~ number)* }
+directive_int   = { ".int" ~ number ~ ("," ~ number)* }
+directive_long  = { ".long" ~ number ~ ("," ~ number)* }
+directive_quad  = { ".quad" ~ number ~ ("," ~ number)* }
+
+directive_inner = {
+    directive_globl
+  | directive_extern
+  | directive_equ
+  | directive_section
+  | directive_ascii
+  | directive_byte
+  | directive_short
+  | directive_word
+  | directive_int
+  | directive_long
+  | directive_quad
+}
+directive       = { directive_inner ~ NEWLINE }
+
+// ============================
+// DEFAULT INSTRUCTIONS
+// ============================
+
+// Arithmetic and Logical Operations (64-bit)
+alu_64_op       = {
+    "add64"
+  | "sub64"
+  | "mul64"
+  | "div64"
+  | "mod64"
+  | "or64"
+  | "and64"
+  | "xor64"
+  | "mov64"
+  | "lsh64"
+  | "rsh64"
+  | "arsh64"
+  | "hor64"
+}
+instr_alu64_imm = { alu_64_op ~ register ~ "," ~ operand }
+instr_alu64_reg = { alu_64_op ~ register ~ "," ~ register }
+
+// Arithmetic and Logical Operations (32-bit)
+alu_32_op       = {
+    "add32"
+  | "sub32"
+  | "mul32"
+  | "div32"
+  | "mod32"
+  | "or32"
+  | "and32"
+  | "xor32"
+  | "mov32"
+  | "lsh32"
+  | "rsh32"
+  | "arsh32"
+}
+instr_alu32_imm = { alu_32_op ~ register ~ "," ~ operand }
+instr_alu32_reg = { alu_32_op ~ register ~ "," ~ register }
+
+// Negate operation
+instr_neg32 = { "neg32" ~ register }
+instr_neg64 = { "neg64" ~ register }
+
+// Memory Load Operations
+load_op    = { "ldxb" | "ldxh" | "ldxw" | "ldxdw" }
+instr_load = { load_op ~ register ~ "," ~ memory_ref }
+instr_lddw = { "lddw" ~ register ~ "," ~ operand }
+
+// Memory store Operations
+store_op_imm    = { "stb" | "sth" | "stw" | "stdw" }
+store_op_reg    = { "stxb" | "stxh" | "stxw" | "stxdw" }
+instr_store_imm = { store_op_imm ~ memory_ref ~ "," ~ operand }
+instr_store_reg = { store_op_reg ~ memory_ref ~ "," ~ register }
+
+// Control Flow Operations (Jumps)
+jump_op = {
+    "jeq"
+  | "jne"
+  | "jgt"
+  | "jge"
+  | "jlt"
+  | "jle"
+  | "jsgt"
+  | "jsge"
+  | "jslt"
+  | "jsle"
+  | "jset"
+}
+
+jump32_op = {
+    "jeq32"
+  | "jne32"
+  | "jgt32"
+  | "jge32"
+  | "jlt32"
+  | "jle32"
+  | "jsgt32"
+  | "jsge32"
+  | "jslt32"
+  | "jsle32"
+  | "jset32"
+}
+
+instr_jump_imm    = { jump_op ~ register ~ "," ~ operand ~ "," ~ jump_target }
+instr_jump_reg    = { jump_op ~ register ~ "," ~ register ~ "," ~ jump_target }
+instr_jump32_imm  = { jump32_op ~ register ~ "," ~ operand ~ "," ~ jump_target }
+instr_jump32_reg  = { jump32_op ~ register ~ "," ~ register ~ "," ~ jump_target }
+instr_jump_uncond = { "ja" ~ jump_target }
+
+// Byte Swap Operations
+endian_op    = { "be16" | "be32" | "be64" | "le16" | "le32" | "le64" }
+instr_endian = { endian_op ~ register }
+
+// ============================
+// LLVM DIALECT INSTRUCTIONS
+// ============================
+
+// ALU operations
+alu_op           = { "s>>=" | "s/=" | "s%=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "|=" | "&=" | "^=" | "%=" | "=" }
+instr_llvm_alu64 = { register ~ alu_op ~ (register | operand) }
+instr_llvm_alu32 = { register_32 ~ alu_op ~ (register_32 | operand) }
+
+// Negate operations
+instr_llvm_neg64 = { register ~ "=" ~ "-" ~ register }
+instr_llvm_neg32 = { register_32 ~ "=" ~ "-" ~ register_32 }
+
+// Memory load operations
+instr_llvm_load = { llvm_register ~ "=" ~ "*" ~ "(" ~ mem_size ~ "*" ~ ")" ~ llvm_memory_ref }
+instr_llvm_lddw = { register ~ "=" ~ operand ~ "ll" }
+
+// Memory store operation
+instr_llvm_store_reg = { "*" ~ "(" ~ mem_size ~ "*" ~ ")" ~ llvm_memory_ref ~ "=" ~ llvm_register }
+instr_llvm_store_imm = { "*" ~ "(" ~ mem_size ~ "*" ~ ")" ~ llvm_memory_ref ~ "=" ~ operand }
+
+// Byte swap operations
+instr_llvm_endian = { register ~ "=" ~ endian_op ~ register }
+
+// Control flow operations
+cmp_op                 = { "s>=" | "s<=" | "s>" | "s<" | "==" | "!=" | ">=" | "<=" | ">" | "<" | "&" }
+instr_llvm_jump_uncond = { "goto" ~ jump_target }
+instr_llvm_jump_reg    = { "if" ~ register ~ cmp_op ~ register ~ "goto" ~ jump_target }
+instr_llvm_jump_imm    = { "if" ~ register ~ cmp_op ~ operand ~ "goto" ~ jump_target }
+instr_llvm_jump32_reg  = { "if" ~ register_32 ~ cmp_op ~ register_32 ~ "goto" ~ jump_target }
+instr_llvm_jump32_imm  = { "if" ~ register_32 ~ cmp_op ~ operand ~ "goto" ~ jump_target }
+
+// ============================
+// SHARED INSTRUCTIONS
+// ============================
+
+instr_call  = { "call" ~ symbol }
+instr_callx = { "callx" ~ register }
+instr_exit  = { "exit" }
+
+// ============================
+// PROGRAM STRUCTURE
+// ============================
+
+instr_default     = {
+    (instr_lddw | instr_callx | instr_call | instr_exit | instr_neg32 | instr_neg64 | instr_alu64_imm | instr_alu64_reg | instr_alu32_imm | instr_alu32_reg | instr_load | instr_store_imm | instr_store_reg | instr_jump_imm | instr_jump_reg | instr_jump32_imm | instr_jump32_reg | instr_jump_uncond | instr_endian) ~ (NEWLINE | &EOI)
+}
+label_default     = { (identifier | numeric_label) ~ ":" ~ ((directive_inner | instr_default) | NEWLINE) }
+statement_default = { NEWLINE | label_default | directive | instr_default }
+program_default   = { SOI ~ statement_default* ~ EOI }
+
+instr_llvm     = {
+    (instr_llvm_lddw | instr_llvm_load | instr_llvm_store_reg | instr_llvm_store_imm | instr_llvm_endian | instr_llvm_neg64 | instr_llvm_neg32 | instr_llvm_alu64 | instr_llvm_alu32 | instr_llvm_jump_uncond | instr_llvm_jump_reg | instr_llvm_jump_imm | instr_llvm_jump32_reg | instr_llvm_jump32_imm | instr_callx | instr_call | instr_exit) ~ (NEWLINE | &EOI)
+}
+label_llvm     = { (identifier | numeric_label) ~ ":" ~ ((directive_inner | instr_llvm) | NEWLINE) }
+statement_llvm = { NEWLINE | label_llvm | directive | instr_llvm }
+program_llvm   = { SOI ~ statement_llvm* ~ EOI }
+
+program = _{ program_default | program_llvm }

@@ -1,0 +1,16 @@
+[package]
+name = "sbpf-asm-counter"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[dev-dependencies]
+mollusk-svm = { workspace = true }
+solana-instruction = { workspace = true }
+solana-account = { workspace = true }
+solana-address = { workspace = true }
+solana-program-error = { workspace = true }
+solana-native-token = { workspace = true }
+
+[features]
+example-tests = []

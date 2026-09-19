@@ -1,0 +1,8 @@
+/target
+.DS_Store
+.sbpf
+test-ledger
+deploy
+*.sh
+.npmrc
+npm/dist/

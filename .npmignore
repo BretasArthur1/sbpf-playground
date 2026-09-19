@@ -1,0 +1,39 @@
+# Rust artifacts
+target/
+Cargo.lock
+**/*.rs
+**/Cargo.toml
+Makefile
+rustfmt.toml
+.cargo/
+
+# Rust build artifacts
+*.rlib
+*.rmeta
+*.so
+*.dylib
+*.dll
+
+# Source code (keep only compiled artifacts)
+src/
+crates/
+
+# Development files
+.git/
+.github/
+.gitignore
+*.md
+!README.md
+
+# Credentials
+.npmrc
+
+# Test and example files
+tests/
+examples/
+benches/
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+azure-pipelines.yml

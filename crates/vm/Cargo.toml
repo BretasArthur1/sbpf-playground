@@ -1,0 +1,24 @@
+[package]
+name = "sbpf-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Lightweight VM for SBPF (Solana BPF) bytecode"
+keywords = ["solana", "bpf", "vm", "blockchain"]
+categories = ["development-tools"]
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "sbpf_vm"
+
+[dependencies]
+either = { workspace = true }
+sbpf-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

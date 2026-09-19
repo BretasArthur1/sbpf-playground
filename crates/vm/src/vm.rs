@@ -1,0 +1,860 @@
+use {
+    crate::{
+        compute::ComputeMeter,
+        errors::{SbpfVmError, SbpfVmResult},
+        memory::Memory,
+        syscalls::SyscallHandler,
+    },
+    sbpf_common::{
+        OpcodeGroup, OpcodeTable, errors::ExecutionError, execute::Vm, instruction::Instruction,
+    },
+    serde::{Deserialize, Serialize},
+};
+
+/// VM configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SbpfVmConfig {
+    pub max_call_depth: usize,
+    pub compute_unit_limit: u64,
+    pub heap_size: usize,
+}
+
+impl Default for SbpfVmConfig {
+    fn default() -> Self {
+        Self {
+            max_call_depth: 64,
+            compute_unit_limit: 1_400_000,
+            heap_size: Memory::DEFAULT_HEAP_SIZE,
+        }
+    }
+}
+
+/// Call frame for internal function calls
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallFrame {
+    pub return_pc: usize,
+    pub saved_registers: [u64; 4], // callee-saved registers (r6-r9)
+    pub saved_frame_pointer: u64,
+}
+
+/// sBPF Virtual Machine
+pub struct SbpfVm<H: SyscallHandler> {
+    pub config: SbpfVmConfig,
+    pub registers: [u64; 11],
+    pub pc: usize,
+    pub call_stack: Vec<CallFrame>,
+    pub memory: Memory,
+    pub program: Vec<Instruction>,
+    pub halted: bool,
+    pub exit_code: Option<u64>,
+    pub compute_meter: ComputeMeter,
+    pub syscall_handler: H,
+}
+
+impl<H: SyscallHandler> SbpfVm<H> {
+    pub fn new(
+        program: Vec<Instruction>,
+        input: Vec<u8>,
+        rodata: Vec<u8>,
+        syscall_handler: H,
+    ) -> Self {
+        Self::new_with_config(
+            program,
+            input,
+            rodata,
+            syscall_handler,
+            SbpfVmConfig::default(),
+        )
+    }
+
+    pub fn new_with_config(
+        program: Vec<Instruction>,
+        input: Vec<u8>,
+        rodata: Vec<u8>,
+        syscall_handler: H,
+        config: SbpfVmConfig,
+    ) -> Self {
+        let memory = Memory::new(
+            input,
+            rodata,
+            Memory::stack_size(config.max_call_depth),
+            config.heap_size,
+        );
+
+        let mut registers = [0u64; 11];
+        registers[1] = Memory::INPUT_START;
+        registers[10] = memory.initial_frame_pointer();
+
+        Self {
+            registers,
+            pc: 0,
+            call_stack: Vec::new(),
+            memory,
+            program,
+            halted: false,
+            exit_code: None,
+            compute_meter: ComputeMeter::new(config.compute_unit_limit),
+            syscall_handler,
+            config,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.registers = [0u64; 11];
+        self.registers[1] = Memory::INPUT_START;
+        self.registers[10] = self.memory.initial_frame_pointer();
+        self.pc = 0;
+        self.call_stack.clear();
+        self.halted = false;
+        self.exit_code = None;
+        self.compute_meter.reset();
+        self.memory.reset_heap();
+    }
+
+    pub fn current_instruction(&self) -> SbpfVmResult<&Instruction> {
+        self.program
+            .get(self.pc)
+            .ok_or(SbpfVmError::PcOutOfBounds(self.pc))
+    }
+
+    pub fn set_entrypoint(&mut self, pc: usize) {
+        self.pc = pc;
+    }
+
+    pub fn is_pc_valid(&self) -> bool {
+        self.pc < self.program.len()
+    }
+
+    pub fn get_remaining(&self) -> u64 {
+        self.compute_meter.get_remaining()
+    }
+
+    pub fn step(&mut self) -> SbpfVmResult<()> {
+        if self.halted {
+            return Ok(());
+        }
+
+        if !self.is_pc_valid() {
+            return Err(SbpfVmError::PcOutOfBounds(self.pc));
+        }
+
+        self.compute_meter.consume(1)?;
+
+        let inst = self.current_instruction()?.clone();
+        self.execute_instruction(&inst)?;
+
+        Ok(())
+    }
+
+    fn execute_instruction(&mut self, inst: &Instruction) -> SbpfVmResult<()> {
+        inst.opcode.group().execute_fn()(self, inst)?;
+        Ok(())
+    }
+
+    pub fn run(&mut self) -> SbpfVmResult<()> {
+        let mut steps = 0;
+
+        while !self.halted && steps < self.config.compute_unit_limit {
+            self.step()?;
+            steps += 1;
+        }
+
+        if !self.halted && steps >= self.config.compute_unit_limit {
+            return Err(SbpfVmError::ExecutionLimitReached(
+                self.config.compute_unit_limit,
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl<H: SyscallHandler> Vm for SbpfVm<H> {
+    fn get_register(&self, reg: usize) -> u64 {
+        self.registers[reg]
+    }
+
+    fn set_register(&mut self, reg: usize, value: u64) {
+        self.registers[reg] = value;
+    }
+
+    fn get_pc(&self) -> usize {
+        self.pc
+    }
+
+    fn set_pc(&mut self, pc: usize) {
+        self.pc = pc;
+    }
+
+    fn read_u8(&self, addr: u64) -> Result<u8, ExecutionError> {
+        self.memory
+            .read_u8(addr)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn read_u16(&self, addr: u64) -> Result<u16, ExecutionError> {
+        self.memory
+            .read_u16(addr)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn read_u32(&self, addr: u64) -> Result<u32, ExecutionError> {
+        self.memory
+            .read_u32(addr)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn read_u64(&self, addr: u64) -> Result<u64, ExecutionError> {
+        self.memory
+            .read_u64(addr)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn write_u8(&mut self, addr: u64, value: u8) -> Result<(), ExecutionError> {
+        self.memory
+            .write_u8(addr, value)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn write_u16(&mut self, addr: u64, value: u16) -> Result<(), ExecutionError> {
+        self.memory
+            .write_u16(addr, value)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), ExecutionError> {
+        self.memory
+            .write_u32(addr, value)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn write_u64(&mut self, addr: u64, value: u64) -> Result<(), ExecutionError> {
+        self.memory
+            .write_u64(addr, value)
+            .map_err(|_| ExecutionError::InvalidMemoryAccess(addr))
+    }
+
+    fn get_call_depth(&self) -> usize {
+        self.call_stack.len()
+    }
+
+    fn max_call_depth(&self) -> usize {
+        self.config.max_call_depth
+    }
+
+    fn push_frame(
+        &mut self,
+        return_pc: usize,
+        saved_registers: [u64; 4],
+        saved_frame_pointer: u64,
+    ) -> Result<(), ExecutionError> {
+        self.call_stack.push(CallFrame {
+            return_pc,
+            saved_registers,
+            saved_frame_pointer,
+        });
+        Ok(())
+    }
+
+    fn pop_frame(&mut self) -> Option<(usize, [u64; 4], u64)> {
+        self.call_stack.pop().map(|frame| {
+            (
+                frame.return_pc,
+                frame.saved_registers,
+                frame.saved_frame_pointer,
+            )
+        })
+    }
+
+    fn halt(&mut self, exit_code: u64) {
+        self.halted = true;
+        self.exit_code = Some(exit_code);
+    }
+
+    fn get_stack_frame_size(&self) -> u64 {
+        Memory::STACK_FRAME_SIZE
+    }
+
+    fn handle_syscall(&mut self, name: &str) -> Result<u64, ExecutionError> {
+        let registers = [
+            self.registers[1],
+            self.registers[2],
+            self.registers[3],
+            self.registers[4],
+            self.registers[5],
+        ];
+        self.syscall_handler
+            .handle(
+                name,
+                registers,
+                &mut self.memory,
+                self.compute_meter.clone(),
+            )
+            .map_err(|e| ExecutionError::SyscallError(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::syscalls::MockSyscallHandler,
+        either::Either,
+        sbpf_common::{
+            inst_param::{Number, Register},
+            opcode::Opcode,
+        },
+    };
+
+    fn make_test_instruction(
+        opcode: sbpf_common::opcode::Opcode,
+        dst: Option<sbpf_common::inst_param::Register>,
+        src: Option<sbpf_common::inst_param::Register>,
+        off: Option<Either<String, i16>>,
+        imm: Option<Either<String, Number>>,
+    ) -> Instruction {
+        Instruction {
+            opcode,
+            dst,
+            src,
+            off,
+            imm,
+            span: 0..0,
+        }
+    }
+
+    #[test]
+    fn test_vm_initialization() {
+        let program = vec![make_test_instruction(Opcode::Exit, None, None, None, None)];
+        let vm = SbpfVm::new(
+            program,
+            vec![1, 2, 3, 4],
+            vec![],
+            MockSyscallHandler::default(),
+        );
+
+        assert_eq!(vm.pc, 0);
+        assert_eq!(vm.registers[1], Memory::INPUT_START);
+        assert_eq!(
+            vm.registers[10],
+            Memory::STACK_START + Memory::STACK_FRAME_SIZE
+        );
+        assert!(!vm.halted);
+        assert_eq!(vm.exit_code, None);
+    }
+
+    #[test]
+    fn test_vm_reset() {
+        let program = vec![make_test_instruction(Opcode::Exit, None, None, None, None)];
+        let mut vm = SbpfVm::new(
+            program,
+            vec![1, 2, 3, 4],
+            vec![],
+            MockSyscallHandler::default(),
+        );
+
+        // modify vm
+        vm.registers[0] = 11;
+        vm.pc = 10;
+        vm.halted = true;
+        vm.exit_code = Some(1);
+
+        // reset
+        vm.reset();
+
+        assert_eq!(vm.pc, 0);
+        assert_eq!(vm.registers[0], 0);
+        assert_eq!(vm.registers[1], Memory::INPUT_START);
+        assert!(!vm.halted);
+        assert_eq!(vm.exit_code, None);
+    }
+
+    #[test]
+    fn test_current_instruction() {
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 0 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(123))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+        let vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        let inst = vm.current_instruction().unwrap();
+        assert_eq!(inst.opcode, Opcode::Mov64Imm);
+    }
+
+    #[test]
+    fn test_load_store() {
+        // lddw r1, 0x12345
+        // mov64 r2, r10
+        // sub r2, 8
+        // stxdw [r2 + 0], r1
+        // ldxdw r3, [r2 + 0]
+        let program = vec![
+            make_test_instruction(
+                Opcode::Lddw,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(0x12345u64 as i64))),
+            ),
+            make_test_instruction(
+                Opcode::Mov64Reg,
+                Some(Register { n: 2 }),
+                Some(Register { n: 10 }),
+                None,
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Sub64Imm,
+                Some(Register { n: 2 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(8))),
+            ),
+            make_test_instruction(
+                Opcode::Stxdw,
+                Some(Register { n: 2 }),
+                Some(Register { n: 1 }),
+                Some(Either::Right(0)),
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Ldxdw,
+                Some(Register { n: 3 }),
+                Some(Register { n: 2 }),
+                Some(Either::Right(0)),
+                None,
+            ),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        for _ in 0..5 {
+            vm.step().unwrap();
+        }
+
+        assert_eq!(vm.registers[3], 0x12345);
+    }
+
+    #[test]
+    fn test_alu64_operations() {
+        // mov64 r1, 10
+        // add64 r1, 5
+        // mul r1, 2
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(10))),
+            ),
+            make_test_instruction(
+                Opcode::Add64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(5))),
+            ),
+            make_test_instruction(
+                Opcode::Mul64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(2))),
+            ),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        vm.step().unwrap();
+        assert_eq!(vm.registers[1], 10);
+
+        vm.step().unwrap();
+        assert_eq!(vm.registers[1], 15);
+
+        vm.step().unwrap();
+        assert_eq!(vm.registers[1], 30);
+    }
+
+    #[test]
+    fn test_memory_regions() {
+        // Check input region
+        let input = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let rodata = vec![10, 20, 30, 40];
+
+        let program = vec![make_test_instruction(Opcode::Exit, None, None, None, None)];
+        let vm = SbpfVm::new(program, input, rodata, MockSyscallHandler::default());
+
+        assert_eq!(vm.memory.read_u8(Memory::INPUT_START).unwrap(), 1);
+        assert_eq!(
+            vm.memory.read_u64(Memory::INPUT_START).unwrap(),
+            0x0807060504030201u64
+        );
+
+        // Check rodata region
+        assert_eq!(vm.memory.read_u8(Memory::RODATA_START).unwrap(), 10);
+    }
+
+    #[test]
+    fn test_program_without_exit() {
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 0 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(10))),
+            ),
+            make_test_instruction(
+                Opcode::Add64Imm,
+                Some(Register { n: 0 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(8))),
+            ),
+            // no exit instruction
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 1);
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 2);
+
+        let result = vm.step();
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SbpfVmError::PcOutOfBounds(2))));
+    }
+
+    #[test]
+    fn test_step_complete_program() {
+        // mov64 r1, 10
+        // add64 r1, 5
+        // mul r1, 3
+        // sub r1, 7
+        // exit
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(10))),
+            ),
+            make_test_instruction(
+                Opcode::Add64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(5))),
+            ),
+            make_test_instruction(
+                Opcode::Mul64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(3))),
+            ),
+            make_test_instruction(
+                Opcode::Sub64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(7))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 1);
+        assert_eq!(vm.registers[1], 10);
+        assert_eq!(vm.compute_meter.get_consumed(), 1);
+        assert!(!vm.halted);
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 2);
+        assert_eq!(vm.registers[1], 15);
+        assert_eq!(vm.compute_meter.get_consumed(), 2);
+        assert!(!vm.halted);
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 3);
+        assert_eq!(vm.registers[1], 45);
+        assert_eq!(vm.compute_meter.get_consumed(), 3);
+        assert!(!vm.halted);
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 4);
+        assert_eq!(vm.registers[1], 38);
+        assert_eq!(vm.compute_meter.get_consumed(), 4);
+        assert!(!vm.halted);
+
+        vm.step().unwrap();
+        assert_eq!(vm.pc, 4);
+        assert_eq!(vm.registers[1], 38);
+        assert_eq!(vm.compute_meter.get_consumed(), 5);
+        assert!(vm.halted);
+    }
+
+    #[test]
+    fn test_run_complete_program() {
+        // mov64 r1, 10
+        // add64 r1, 5
+        // mul r1, 3
+        // sub r1, 7
+        // exit
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(10))),
+            ),
+            make_test_instruction(
+                Opcode::Add64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(5))),
+            ),
+            make_test_instruction(
+                Opcode::Mul64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(3))),
+            ),
+            make_test_instruction(
+                Opcode::Sub64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(7))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        vm.run().unwrap();
+
+        assert!(vm.halted);
+        assert_eq!(vm.registers[1], 38);
+        assert_eq!(vm.pc, 4);
+        assert_eq!(vm.compute_meter.get_consumed(), 5);
+    }
+
+    #[test]
+    fn test_program_with_input() {
+        // ldxdw r2, [r1 + 0]
+        // ldxdw r3, [r1 + 8]
+        // mov64 r4, r2
+        // add64 r4, r3
+        // exit
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&10u64.to_le_bytes());
+        input.extend_from_slice(&20u64.to_le_bytes());
+
+        let program = vec![
+            make_test_instruction(
+                Opcode::Ldxdw,
+                Some(Register { n: 2 }),
+                Some(Register { n: 1 }),
+                Some(Either::Right(0)),
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Ldxdw,
+                Some(Register { n: 3 }),
+                Some(Register { n: 1 }),
+                Some(Either::Right(8)),
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Mov64Reg,
+                Some(Register { n: 4 }),
+                Some(Register { n: 2 }),
+                None,
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Add64Reg,
+                Some(Register { n: 4 }),
+                Some(Register { n: 3 }),
+                None,
+                None,
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, input, vec![], MockSyscallHandler::default());
+
+        vm.run().unwrap();
+
+        assert!(vm.halted);
+        assert_eq!(vm.registers[2], 10);
+        assert_eq!(vm.registers[3], 20);
+        assert_eq!(vm.registers[4], 30);
+        assert_eq!(vm.compute_meter.get_consumed(), 5);
+    }
+
+    #[test]
+    fn test_program_with_internal_function_call() {
+        // call test
+        // lddw r2, 0x2
+        // exit
+        //
+        // test:
+        //   lddw r1, 0x1
+        //   exit
+        let program = vec![
+            make_test_instruction(
+                Opcode::Call,
+                None,
+                None,
+                None,
+                Some(Either::Right(Number::Int(2))),
+            ),
+            make_test_instruction(
+                Opcode::Lddw,
+                Some(Register { n: 2 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(0x2))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+            make_test_instruction(
+                Opcode::Lddw,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(0x1))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+
+        vm.run().unwrap();
+
+        assert!(vm.halted);
+        assert_eq!(vm.registers[1], 0x1);
+        assert_eq!(vm.registers[2], 0x2);
+    }
+
+    #[test]
+    fn test_vm_jmp32_imm() {
+        // lddw r1, 0x00000001_00000005
+        // jeq32 r1, 5, +2
+        // mov64 r2, 1
+        // exit
+        // mov64 r2, 2
+        // exit
+        let program = vec![
+            make_test_instruction(
+                Opcode::Lddw,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(0x0000_0001_0000_0005))),
+            ),
+            make_test_instruction(
+                Opcode::Jeq32Imm,
+                Some(Register { n: 1 }),
+                None,
+                Some(Either::Right(2)),
+                Some(Either::Right(Number::Int(5))),
+            ),
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 2 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(1))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 2 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(2))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+        vm.run().unwrap();
+
+        assert!(vm.halted);
+        assert_eq!(vm.registers[2], 2);
+    }
+
+    #[test]
+    fn test_vm_jmp32_reg() {
+        // mov64 r1, -1
+        // mov64 r2, 0
+        // jslt32 r1, r2, +2
+        // mov64 r3, 1
+        // exit
+        // mov64 r3, 2
+        // exit
+        let program = vec![
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 1 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(-1))),
+            ),
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 2 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(0))),
+            ),
+            make_test_instruction(
+                Opcode::Jslt32Reg,
+                Some(Register { n: 1 }),
+                Some(Register { n: 2 }),
+                Some(Either::Right(2)),
+                None,
+            ),
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 3 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(1))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+            make_test_instruction(
+                Opcode::Mov64Imm,
+                Some(Register { n: 3 }),
+                None,
+                None,
+                Some(Either::Right(Number::Int(2))),
+            ),
+            make_test_instruction(Opcode::Exit, None, None, None, None),
+        ];
+
+        let mut vm = SbpfVm::new(program, vec![], vec![], MockSyscallHandler::default());
+        vm.run().unwrap();
+
+        assert!(vm.halted);
+        assert_eq!(vm.registers[3], 2);
+    }
+}

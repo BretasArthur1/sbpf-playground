@@ -1,0 +1,421 @@
+use {
+    crate::{errors::DisassemblerError, section_header_entry::SectionHeaderEntry},
+    object::{Endianness, read::elf::ElfFile64},
+    serde::{Deserialize, Serialize},
+    std::fmt::{Debug, Display},
+};
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum SectionHeaderType {
+    SHT_NULL = 0x00,           // Section header table entry unused
+    SHT_PROGBITS = 0x01,       // Program data
+    SHT_SYMTAB = 0x02,         // Symbol table
+    SHT_STRTAB = 0x03,         // String table
+    SHT_RELA = 0x04,           // Relocation entries with addends
+    SHT_HASH = 0x05,           // Symbol hash table
+    SHT_DYNAMIC = 0x06,        // Dynamic linking information
+    SHT_NOTE = 0x07,           // Notes
+    SHT_NOBITS = 0x08,         // Program space with no data (bss)
+    SHT_REL = 0x09,            // Relocation entries, no addends
+    SHT_SHLIB = 0x0A,          // Reserved
+    SHT_DYNSYM = 0x0B,         // Dynamic linker symbol table
+    SHT_INIT_ARRAY = 0x0E,     // Array of constructors
+    SHT_FINI_ARRAY = 0x0F,     // Array of destructors
+    SHT_PREINIT_ARRAY = 0x10,  // Array of pre-constructors
+    SHT_GROUP = 0x11,          // Section group
+    SHT_SYMTAB_SHNDX = 0x12,   // Extended section indices
+    SHT_NUM = 0x13,            // Number of defined types.
+    SHT_GNU_HASH = 0x6ffffff6, // GNU Hash
+}
+
+impl TryFrom<u32> for SectionHeaderType {
+    type Error = DisassemblerError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0x00 => Self::SHT_NULL,
+            0x01 => Self::SHT_PROGBITS,
+            0x02 => Self::SHT_SYMTAB,
+            0x03 => Self::SHT_STRTAB,
+            0x04 => Self::SHT_RELA,
+            0x05 => Self::SHT_HASH,
+            0x06 => Self::SHT_DYNAMIC,
+            0x07 => Self::SHT_NOTE,
+            0x08 => Self::SHT_NOBITS,
+            0x09 => Self::SHT_REL,
+            0x0A => Self::SHT_SHLIB,
+            0x0B => Self::SHT_DYNSYM,
+            0x0E => Self::SHT_INIT_ARRAY,
+            0x0F => Self::SHT_FINI_ARRAY,
+            0x10 => Self::SHT_PREINIT_ARRAY,
+            0x11 => Self::SHT_GROUP,
+            0x12 => Self::SHT_SYMTAB_SHNDX,
+            0x13 => Self::SHT_NUM,
+            0x6ffffff6 => Self::SHT_GNU_HASH,
+            _ => return Err(DisassemblerError::InvalidSectionHeaderType(value)),
+        })
+    }
+}
+
+impl Display for SectionHeaderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(Into::<&str>::into(self.clone()))
+    }
+}
+
+impl From<SectionHeaderType> for &str {
+    fn from(val: SectionHeaderType) -> Self {
+        match val {
+            SectionHeaderType::SHT_NULL => "SHT_NULL",
+            SectionHeaderType::SHT_PROGBITS => "SHT_PROGBITS",
+            SectionHeaderType::SHT_SYMTAB => "SHT_SYMTAB",
+            SectionHeaderType::SHT_STRTAB => "SHT_STRTAB",
+            SectionHeaderType::SHT_RELA => "SHT_RELA",
+            SectionHeaderType::SHT_HASH => "SHT_HASH",
+            SectionHeaderType::SHT_DYNAMIC => "SHT_DYNAMIC",
+            SectionHeaderType::SHT_NOTE => "SHT_NOTE",
+            SectionHeaderType::SHT_NOBITS => "SHT_NOBITS",
+            SectionHeaderType::SHT_REL => "SHT_REL",
+            SectionHeaderType::SHT_SHLIB => "SHT_SHLIB",
+            SectionHeaderType::SHT_DYNSYM => "SHT_DYNSYM",
+            SectionHeaderType::SHT_INIT_ARRAY => "SHT_INIT_ARRAY",
+            SectionHeaderType::SHT_FINI_ARRAY => "SHT_FINI_ARRAY",
+            SectionHeaderType::SHT_PREINIT_ARRAY => "SHT_PREINIT_ARRAY",
+            SectionHeaderType::SHT_GROUP => "SHT_GROUP",
+            SectionHeaderType::SHT_SYMTAB_SHNDX => "SHT_SYMTAB_SHNDX",
+            SectionHeaderType::SHT_NUM => "SHT_NUM",
+            SectionHeaderType::SHT_GNU_HASH => "SHT_GNU_HASH",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectionHeader {
+    pub sh_name: u32, // An offset to a string in the .shstrtab section that represents the name of this section.
+    pub sh_type: SectionHeaderType, // Identifies the type of this header.
+    pub sh_flags: u64, // Identifies the attributes of the section.
+    pub sh_addr: u64, // Virtual address of the section in memory, for sections that are loaded.
+    pub sh_offset: u64, // Offset of the section in the file image.
+    pub sh_size: u64, // Size in bytes of the section in the file image. May be 0.
+    pub sh_link: u32, // Contains the section index of an associated section. This field is used for several purposes, depending on the type of section.
+    pub sh_info: u32, // Contains extra information about the section. This field is used for several purposes, depending on the type of section.
+    pub sh_addralign: u64, // Contains the required alignment of the section. This field must be a power of two.
+    pub sh_entsize: u64, // Contains the size, in bytes, of each entry, for sections that contain fixed-size entries. Otherwise, this field contains zero.
+}
+
+impl SectionHeader {
+    pub fn from_elf_file(
+        elf_file: &ElfFile64<Endianness>,
+    ) -> Result<(Vec<Self>, Vec<SectionHeaderEntry>), Vec<DisassemblerError>> {
+        let endian = elf_file.endian();
+        let section_headers_data: Vec<_> = elf_file.elf_section_table().iter().collect();
+
+        let mut errors = Vec::new();
+
+        let mut section_headers = Vec::new();
+        for sh in section_headers_data.iter() {
+            let sh_name = sh.sh_name.get(endian);
+            let sh_type = SectionHeaderType::try_from(sh.sh_type.get(endian)).unwrap_or_else(|e| {
+                errors.push(e);
+                SectionHeaderType::SHT_NULL
+            });
+            let sh_flags = sh.sh_flags.get(endian);
+            let sh_addr = sh.sh_addr.get(endian);
+            let sh_offset = sh.sh_offset.get(endian);
+            let sh_size = sh.sh_size.get(endian);
+            let sh_link = sh.sh_link.get(endian);
+            let sh_info = sh.sh_info.get(endian);
+            let sh_addralign = sh.sh_addralign.get(endian);
+            let sh_entsize = sh.sh_entsize.get(endian);
+
+            section_headers.push(SectionHeader {
+                sh_name,
+                sh_type,
+                sh_flags,
+                sh_addr,
+                sh_offset,
+                sh_size,
+                sh_link,
+                sh_info,
+                sh_addralign,
+                sh_entsize,
+            });
+        }
+
+        // v3 binaries omit the section header table entirely. With no section
+        // headers there are no names to resolve, so return empty here; the
+        // caller reconstructs .text/.rodata views from the program headers.
+        if section_headers.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let data = elf_file.data();
+        let elf_header = elf_file.elf_header();
+        let e_shstrndx = elf_header.e_shstrndx.get(endian);
+        let Some(shstrndx) = section_headers.get(e_shstrndx as usize) else {
+            errors.push(DisassemblerError::InvalidShstrndx {
+                shstrndx: e_shstrndx,
+                shnum: section_headers.len(),
+            });
+            return Err(errors);
+        };
+        let strtab_start = shstrndx.sh_offset as usize;
+        let strtab_end = strtab_start.saturating_add(shstrndx.sh_size as usize);
+        let Some(shstrndx_value) = data.get(strtab_start..strtab_end) else {
+            errors.push(DisassemblerError::SectionDataOutOfBounds {
+                section: ".shstrtab".to_string(),
+                offset: shstrndx.sh_offset,
+                size: shstrndx.sh_size,
+                file_len: data.len(),
+            });
+            return Err(errors);
+        };
+        let shstrndx_value = shstrndx_value.to_vec();
+
+        let mut section_header_entries = Vec::with_capacity(section_headers.len());
+        for s in &section_headers {
+            let current_offset = s.sh_name as usize;
+
+            // Find the null terminator for this string.
+            let label = match shstrndx_value.get(current_offset..) {
+                Some(label_bytes) if !label_bytes.is_empty() => {
+                    let null_pos = label_bytes
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(label_bytes.len());
+                    String::from_utf8(
+                        label_bytes[..=null_pos.min(label_bytes.len().saturating_sub(1))].to_vec(),
+                    )
+                    .unwrap_or("default".to_string())
+                }
+                _ => {
+                    errors.push(DisassemblerError::InvalidSectionName {
+                        sh_name: s.sh_name,
+                        strtab_len: shstrndx_value.len(),
+                    });
+                    "default".to_string()
+                }
+            };
+
+            let data_start = s.sh_offset as usize;
+            let data_end = data_start.saturating_add(s.sh_size as usize);
+            let section_data = match data.get(data_start..data_end) {
+                Some(d) => d.to_vec(),
+                None => {
+                    errors.push(DisassemblerError::SectionDataOutOfBounds {
+                        section: label.trim_end_matches('\0').to_string(),
+                        offset: s.sh_offset,
+                        size: s.sh_size,
+                        file_len: data.len(),
+                    });
+                    // Best effort: keep whatever bytes exist at the offset.
+                    data.get(data_start..)
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default()
+                }
+            };
+
+            match SectionHeaderEntry::new(label, s.sh_offset as usize, section_data) {
+                Ok(entry) => section_header_entries.push(entry),
+                Err(e) => errors.push(e),
+            }
+        }
+
+        if errors.is_empty() {
+            Ok((section_headers, section_header_entries))
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = self.sh_name.to_le_bytes().to_vec();
+        b.extend_from_slice(&(self.sh_type.clone() as u32).to_le_bytes());
+        b.extend_from_slice(&self.sh_flags.to_le_bytes());
+        b.extend_from_slice(&self.sh_addr.to_le_bytes());
+        b.extend_from_slice(&self.sh_offset.to_le_bytes());
+        b.extend_from_slice(&self.sh_size.to_le_bytes());
+        b.extend_from_slice(&self.sh_link.to_le_bytes());
+        b.extend_from_slice(&self.sh_info.to_le_bytes());
+        b.extend_from_slice(&self.sh_addralign.to_le_bytes());
+        b.extend_from_slice(&self.sh_entsize.to_le_bytes());
+        b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::program::Program, hex_literal::hex};
+
+    #[test]
+    fn test_section_headers() {
+        let program = Program::from_bytes(&hex!("7F454C460201010000000000000000000300F700010000002001000000000000400000000000000028020000000000000000000040003800030040000600050001000000050000002001000000000000200100000000000020010000000000003000000000000000300000000000000000100000000000000100000004000000C001000000000000C001000000000000C0010000000000003C000000000000003C000000000000000010000000000000020000000600000050010000000000005001000000000000500100000000000070000000000000007000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007912A000000000007911182900000000B7000000010000002D21010000000000B70000000000000095000000000000001E0000000000000004000000000000000600000000000000C0010000000000000B0000000000000018000000000000000500000000000000F0010000000000000A000000000000000C00000000000000160000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000120001002001000000000000300000000000000000656E747279706F696E7400002E74657874002E64796E737472002E64796E73796D002E64796E616D6963002E73687374727461620000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000010000000600000000000000200100000000000020010000000000003000000000000000000000000000000008000000000000000000000000000000170000000600000003000000000000005001000000000000500100000000000070000000000000000400000000000000080000000000000010000000000000000F0000000B0000000200000000000000C001000000000000C001000000000000300000000000000004000000010000000800000000000000180000000000000007000000030000000200000000000000F001000000000000F0010000000000000C00000000000000000000000000000001000000000000000000000000000000200000000300000000000000000000000000000000000000FC010000000000002A00000000000000000000000000000001000000000000000000000000000000")).unwrap();
+
+        // Verify we have the expected number of section headers.
+        assert_eq!(program.section_headers.len(), 6);
+        assert_eq!(program.section_header_entries.len(), 6);
+    }
+
+    #[test]
+    fn test_section_header_type_conversions() {
+        // Test all valid TryFrom conversions.
+        assert!(matches!(
+            SectionHeaderType::try_from(0x00),
+            Ok(SectionHeaderType::SHT_NULL)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x01),
+            Ok(SectionHeaderType::SHT_PROGBITS)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x02),
+            Ok(SectionHeaderType::SHT_SYMTAB)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x03),
+            Ok(SectionHeaderType::SHT_STRTAB)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x04),
+            Ok(SectionHeaderType::SHT_RELA)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x05),
+            Ok(SectionHeaderType::SHT_HASH)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x06),
+            Ok(SectionHeaderType::SHT_DYNAMIC)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x07),
+            Ok(SectionHeaderType::SHT_NOTE)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x08),
+            Ok(SectionHeaderType::SHT_NOBITS)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x09),
+            Ok(SectionHeaderType::SHT_REL)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x0A),
+            Ok(SectionHeaderType::SHT_SHLIB)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x0B),
+            Ok(SectionHeaderType::SHT_DYNSYM)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x0E),
+            Ok(SectionHeaderType::SHT_INIT_ARRAY)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x0F),
+            Ok(SectionHeaderType::SHT_FINI_ARRAY)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x10),
+            Ok(SectionHeaderType::SHT_PREINIT_ARRAY)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x11),
+            Ok(SectionHeaderType::SHT_GROUP)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x12),
+            Ok(SectionHeaderType::SHT_SYMTAB_SHNDX)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x13),
+            Ok(SectionHeaderType::SHT_NUM)
+        ));
+        assert!(matches!(
+            SectionHeaderType::try_from(0x6ffffff6),
+            Ok(SectionHeaderType::SHT_GNU_HASH)
+        ));
+
+        // Test invalid value
+        assert!(SectionHeaderType::try_from(0xFF).is_err());
+    }
+
+    #[test]
+    fn test_section_header_type_to_str() {
+        // Test all Into<&str> conversions.
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_NULL), "SHT_NULL");
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_PROGBITS),
+            "SHT_PROGBITS"
+        );
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_SYMTAB), "SHT_SYMTAB");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_STRTAB), "SHT_STRTAB");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_RELA), "SHT_RELA");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_HASH), "SHT_HASH");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_DYNAMIC), "SHT_DYNAMIC");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_NOTE), "SHT_NOTE");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_NOBITS), "SHT_NOBITS");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_REL), "SHT_REL");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_SHLIB), "SHT_SHLIB");
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_DYNSYM), "SHT_DYNSYM");
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_INIT_ARRAY),
+            "SHT_INIT_ARRAY"
+        );
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_FINI_ARRAY),
+            "SHT_FINI_ARRAY"
+        );
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_PREINIT_ARRAY),
+            "SHT_PREINIT_ARRAY"
+        );
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_GROUP), "SHT_GROUP");
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_SYMTAB_SHNDX),
+            "SHT_SYMTAB_SHNDX"
+        );
+        assert_eq!(<&str>::from(SectionHeaderType::SHT_NUM), "SHT_NUM");
+        assert_eq!(
+            <&str>::from(SectionHeaderType::SHT_GNU_HASH),
+            "SHT_GNU_HASH"
+        );
+    }
+
+    #[test]
+    fn test_section_header_type_display() {
+        assert_eq!(SectionHeaderType::SHT_PROGBITS.to_string(), "SHT_PROGBITS");
+        assert_eq!(SectionHeaderType::SHT_DYNAMIC.to_string(), "SHT_DYNAMIC");
+    }
+
+    #[test]
+    fn test_section_header_to_bytes() {
+        let header = SectionHeader {
+            sh_name: 1,
+            sh_type: SectionHeaderType::SHT_PROGBITS,
+            sh_flags: 6,
+            sh_addr: 0x120,
+            sh_offset: 0x120,
+            sh_size: 48,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 8,
+            sh_entsize: 0,
+        };
+
+        let bytes = header.to_bytes();
+        assert_eq!(bytes.len(), 64);
+
+        // Check first few fields.
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            1
+        );
+    }
+}

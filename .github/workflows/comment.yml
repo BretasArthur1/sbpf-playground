@@ -40,7 +40,7 @@ jobs:
             
         # we need this to get into the PR branch or else github.event.issue runs on default branch
         - name: Get PR branch
-          uses: xt0rted/pull-request-comment-branch@v3
+          uses: BretasArthur1/pull-request-comment-branch@master
           id: comment-branch
           
         # same logic as above but for the commit, and put the status as pending as a remembering

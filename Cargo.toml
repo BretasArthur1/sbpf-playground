@@ -1,5 +1,5 @@
 [package]
-name = "sbpf"
+name = "sbpf-playground"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,10 @@ description = "A complete toolchain for building and deploying Solana BPF assemb
 readme = "README.md"
 keywords = ["solana", "bpf", "blockchain", "assembler"]
 categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "sbpf"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]

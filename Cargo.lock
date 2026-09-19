@@ -2274,30 +2274,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sbpf"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "codespan-reporting",
- "ed25519-dalek",
- "either",
- "hex-literal",
- "rand 0.10.2",
- "sbpf-assembler",
- "sbpf-common",
- "sbpf-debugger",
- "sbpf-disassembler",
- "sbpf-runtime",
- "sbpf-vm",
- "serde",
- "serde_json",
- "termcolor",
- "toml 1.1.4+spec-1.1.0",
-]
-
-[[package]]
 name = "sbpf-analyze"
 version = "0.3.0"
 dependencies = [
@@ -2447,6 +2423,30 @@ dependencies = [
  "either",
  "sbpf-common",
  "smallvec",
+]
+
+[[package]]
+name = "sbpf-playground"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "codespan-reporting",
+ "ed25519-dalek",
+ "either",
+ "hex-literal",
+ "rand 0.10.2",
+ "sbpf-assembler",
+ "sbpf-common",
+ "sbpf-debugger",
+ "sbpf-disassembler",
+ "sbpf-runtime",
+ "sbpf-vm",
+ "serde",
+ "serde_json",
+ "termcolor",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

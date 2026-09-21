@@ -15,6 +15,7 @@ jobs:
   test-contributor-fork:
     name: Test contributor fork of sbpf-linker
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read        # checkouts
       statuses: write       # pending/success/failure on the PR head commit
@@ -51,22 +52,31 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       # we need this to get into the PR branch or else github.event.issue runs on default branch
-      - name: Get PR branch
-        uses: BretasArthur1/pull-request-comment-branch@0e2e941b5f843e323ffa875c4fb8320fe5d125c1
+      - name: Get PR head
+        uses: actions/github-script@v9
         id: comment-branch
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({ ...context.repo, pull_number: context.issue.number });
+            core.setOutput('head_sha', pr.data.head.sha);
 
       # same logic as above but for the commit, and put the status as pending as a remembering
       - name: Set latest commit status as pending
-        uses: myrotvorets/set-commit-status-action@16037e056d73b2d3c88e37e393ff369047f70886
+        uses: actions/github-script@v9
         with:
-          sha: ${{ steps.comment-branch.outputs.head_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          status: pending
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: '${{ steps.comment-branch.outputs.head_sha }}',
+              state: 'pending',
+              context: context.workflow,
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Checkout PR branch
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.comment-branch.outputs.head_ref }}
+          ref: ${{ steps.comment-branch.outputs.head_sha }}
           persist-credentials: false
 
       - name: Checkout sbpf-linker
@@ -84,12 +94,17 @@ jobs:
         run: cargo test -- --nocapture
 
       - name: Set latest commit status as ${{ job.status }}
-        uses: myrotvorets/set-commit-status-action@16037e056d73b2d3c88e37e393ff369047f70886
+        uses: actions/github-script@v9
         if: always()
         with:
-          sha: ${{ steps.comment-branch.outputs.head_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          status: ${{ job.status == 'success' && 'success' || 'failure' }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: '${{ steps.comment-branch.outputs.head_sha }}',
+              state: '${{ job.status == 'success' && 'success' || 'failure' }}',
+              context: context.workflow,
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Add a comment to PR
         uses: actions/github-script@v9

@@ -1,10 +1,9 @@
-name: Test on comment
+name: Test sbpf-linker fork
 
 # Worflow for testing the specified sbpf-linker fork against the PR's sbpf crates. 
 # Usage: `/test-sbpf-linker <owner>/<repo> <ref>`
 
 on:
-  pull_request:
   issue_comment:
     types: [created]
 

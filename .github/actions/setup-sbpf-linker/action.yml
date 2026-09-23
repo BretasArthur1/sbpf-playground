@@ -1,7 +1,11 @@
-name: Set up sbpf-linker against local sbpf crates
+name: Set up sbpf-linker against checkout sbpf crates
 description: >
-  Installs the toolchain and patches the sbpf-linker checkout in ./sbpf-linker
+  Installs the toolchain and patches sbpf-linker checkout in ./sbpf-linker
   to use the sbpf crates from the workspace root, then verifies the patch took effect.
+
+# The version rewrite keeps local versions compatible with explicit
+# version requirements. Verification checks both crates resolved manifest paths
+# so an unused patch cannot silently result in testing the wrong code.
 
 runs:
   using: composite

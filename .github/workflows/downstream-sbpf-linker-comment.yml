@@ -1,6 +1,6 @@
 name: Test sbpf-linker fork
 
-# Worflow for testing the specified sbpf-linker fork against the PR's sbpf crates. 
+# Worflow for testing the specified sbpf-linker fork against the PR's sbpf crates.
 # Usage: `/test-sbpf-linker <owner>/<repo> <ref>`
 
 on:
@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: read        # checkouts
-      statuses: write       # pending/success/failure on the PR head commit
-      pull-requests: write  # result comment on the PR
+      contents: read # checkouts
+      statuses: write # pending/success/failure on the PR head commit
+      pull-requests: write # result comment on the PR
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
@@ -42,7 +42,7 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_-.]+/[A-Za-z0-9_-.]+$ ]]; then
             echo "Invalid repository: $repository"
             exit 1
           fi
